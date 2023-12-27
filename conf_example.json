@@ -1,5 +1,5 @@
 {
-  "walletRpcUrl": "",
+  "walletRpcUrl": "http://api.xrpinals.com:1222",
   "logs": {
     "logPath": "./log",
     "level": "debug",
