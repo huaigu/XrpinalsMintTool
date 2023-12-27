@@ -111,7 +111,7 @@ func StartMining(startNonce int64) {
 	for i := 0; i < MinerNum; i++ {
 		wg.Add(1)
 		miner := Miner{}
-		go miner.mining(&wg, uint64(100000000000000000*startNonce)+uint64(i))
+		go miner.mining(&wg, uint64(100000000000000000*startNonce)+uint64(i), i == 0)
 	}
 	wg.Wait()
 
@@ -143,14 +143,9 @@ func (m *Miner) signMintTx(tx *tx_builder.Transaction) (*tx_builder.Transaction,
 	return txSigned, nil
 }
 
-func (m *Miner) mining(wg *sync.WaitGroup, nonce uint64) {
+func (m *Miner) mining(wg *sync.WaitGroup, nonce uint64, statHash bool) {
 	defer wg.Done()
-
-	statHash := false
 	origNonce := nonce
-	if nonce == 0 {
-		statHash = true
-	}
 
 	println("start mining, nonce: ", nonce)
 
