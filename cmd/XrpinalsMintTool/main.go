@@ -3,6 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
+	"os"
+
 	"github.com/fatih/color"
 	"github.com/shopspring/decimal"
 	"github.com/xrpinals/XrpinalsMintTool/conf"
@@ -11,8 +14,6 @@ import (
 	"github.com/xrpinals/XrpinalsMintTool/mining"
 	"github.com/xrpinals/XrpinalsMintTool/tx_builder"
 	"github.com/xrpinals/XrpinalsMintTool/utils"
-	"math"
-	"os"
 )
 
 func appInit() {
@@ -32,8 +33,11 @@ func main() {
 
 		var addr string
 		var asset string
+		var work int64
 		fs.StringVar(&addr, "addr", "", "your address")
 		fs.StringVar(&asset, "asset", "", "asset name you want to mint")
+		fs.Int64Var(&work, "work", 0, "work start with, form 0-100")
+
 		err := fs.Parse(os.Args[2:])
 		if err != nil {
 			fmt.Println(utils.BoldRed("[Error]: "), utils.FgWhiteBgRed(err.Error()))
@@ -59,7 +63,7 @@ func main() {
 			return
 		}
 
-		mining.StartMining()
+		mining.StartMining(work)
 
 	} else if os.Args[1] == "import_key" {
 		fs := flag.NewFlagSet("import_key", flag.ExitOnError)

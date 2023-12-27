@@ -5,11 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/xrpinals/XrpinalsMintTool/bitcoin"
-	"github.com/xrpinals/XrpinalsMintTool/conf"
-	. "github.com/xrpinals/XrpinalsMintTool/logger"
-	"github.com/xrpinals/XrpinalsMintTool/tx_builder"
-	"github.com/xrpinals/XrpinalsMintTool/utils"
 	"math/big"
 	"runtime"
 	"strconv"
@@ -17,6 +12,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xrpinals/XrpinalsMintTool/bitcoin"
+	"github.com/xrpinals/XrpinalsMintTool/conf"
+	. "github.com/xrpinals/XrpinalsMintTool/logger"
+	"github.com/xrpinals/XrpinalsMintTool/tx_builder"
+	"github.com/xrpinals/XrpinalsMintTool/utils"
 )
 
 var (
@@ -86,7 +87,7 @@ func preCheck(assetInfo *utils.AssetInfoRsp) error {
 	return nil
 }
 
-func StartMining() {
+func StartMining(startNonce int64) {
 	isStop.Store(false)
 	resp, err := utils.GetAssetInfo(conf.GetConfig().WalletRpcUrl, MintAssetName)
 	if err != nil {
@@ -110,7 +111,7 @@ func StartMining() {
 	for i := 0; i < MinerNum; i++ {
 		wg.Add(1)
 		miner := Miner{}
-		go miner.mining(&wg, uint64(i))
+		go miner.mining(&wg, uint64(100000000000000000*startNonce)+uint64(i))
 	}
 	wg.Wait()
 
@@ -151,10 +152,13 @@ func (m *Miner) mining(wg *sync.WaitGroup, nonce uint64) {
 		statHash = true
 	}
 
+	println("start mining, nonce: ", nonce)
+
 ReBuildTx:
 	nonce = origNonce
 	statIdx := int64(0)
 	txHash, unSignedTx, err := m.buildMintTx()
+	// print("txHash: ", txHash)
 	if err != nil {
 		Logger.Errorf("mining: buildMintTx err: %v", err)
 		return
