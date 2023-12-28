@@ -11,7 +11,8 @@ require (
 
 require (
 	github.com/bitnexty/secp256k1-go v0.0.0-20190612083540-ca7e6894db32
-	github.com/fatih/color v1.13.0
+	github.com/fatih/color v1.16.0
+	github.com/gosuri/uilive v0.0.4 // indirect
 	github.com/shopspring/decimal v1.3.1
 	github.com/siddontang/go-log v0.0.0-20190221022429-1e957dd83bed
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7

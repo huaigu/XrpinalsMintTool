@@ -1,6 +1,7 @@
 package mining
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -87,7 +88,7 @@ func preCheck(assetInfo *utils.AssetInfoRsp) error {
 	return nil
 }
 
-func StartMining(startNonce int64) {
+func StartMining() {
 	isStop.Store(false)
 	resp, err := utils.GetAssetInfo(conf.GetConfig().WalletRpcUrl, MintAssetName)
 	if err != nil {
@@ -108,10 +109,31 @@ func StartMining(startNonce int64) {
 	Difficult = resp.Result.DynamicData.CurrentNBits
 
 	var wg sync.WaitGroup
+	hashCountChan := make(chan int32, 20000000)
+	var totalHashCount int32 = 0
+
+	ticker := time.NewTicker(1 * time.Second)
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				timestamp := time.Now().Format("2006-01-02 15:04:05")
+				hashesPerSecond := float64(totalHashCount) / 1000000
+
+				fmt.Printf("[%s] Total hashes per second: %8.2f M/s\n", timestamp, hashesPerSecond)
+				// Logger.Infof("[%s] Total hashes per second: %8.2f M/s", timestamp, hashesPerSecond)
+				totalHashCount = 0
+			case count := <-hashCountChan:
+				totalHashCount += count
+			}
+		}
+	}()
+
 	for i := 0; i < MinerNum; i++ {
 		wg.Add(1)
 		miner := Miner{}
-		go miner.mining(&wg, uint64(100000000000000000*startNonce)+uint64(i), i == 0)
+		go miner.mining(&wg, hashCountChan, i == 0)
 	}
 	wg.Wait()
 
@@ -143,103 +165,87 @@ func (m *Miner) signMintTx(tx *tx_builder.Transaction) (*tx_builder.Transaction,
 	return txSigned, nil
 }
 
-func (m *Miner) mining(wg *sync.WaitGroup, nonce uint64, statHash bool) {
+func (m *Miner) mining(wg *sync.WaitGroup, hashCountChan chan<- int32, statHash bool) {
 	defer wg.Done()
-	origNonce := nonce
 
-	println("start mining, nonce: ", nonce)
+	var cycle_times int64 = 10000
+	var randomNonce *big.Int
+	var nonce uint64
+	var err error
 
-ReBuildTx:
-	nonce = origNonce
-	statIdx := int64(0)
+	if err != nil {
+		Logger.Errorf("mining: rand.Int err: %v", err)
+		return
+	}
+
 	txHash, unSignedTx, err := m.buildMintTx()
-	// print("txHash: ", txHash)
 	if err != nil {
 		Logger.Errorf("mining: buildMintTx err: %v", err)
 		return
 	}
-
 	target := bitcoin.NBits2Target(Difficult)
-	statStart := time.Now().UnixMicro()
-	txBuildTime := time.Now().Unix()
-
 	for {
-		if statHash {
-			if statIdx > 10000000 {
-				hashRate := float64(statIdx) / float64(time.Now().UnixMicro()-statStart)
-				hashRateStr := fmt.Sprintf("%.03f", hashRate)
-				fmt.Println(utils.BoldYellow("[Mining]: "),
-					utils.Bold("Pow Hash Speed ------------------------- "),
-					utils.FgWhiteBgGreen(hashRateStr), utils.Bold("MHash/s"))
+		max_number := new(big.Int).Lsh(big.NewInt(1), 256)
+		max_number = max_number.Sub(max_number, big.NewInt(cycle_times))
+		randomNonce, err = rand.Int(rand.Reader, max_number)
 
-				statIdx = 0
-				statStart = time.Now().UnixMicro()
+		if err != nil {
+			Logger.Errorf("mining: rand.Int err: %v", err)
+		}
+
+		nonce = randomNonce.Uint64()
+		for i := 0; i < int(cycle_times); i++ {
+			payload := PowPayload{
+				Version:  1,
+				TxHash:   txHash,
+				Reserved: [44]byte{},
+				NBits:    Difficult,
+				Nonce:    nonce,
 			}
-			statIdx = statIdx + int64(MinerNum)
-		}
 
-		if (time.Now().Unix() - txBuildTime) > tx_builder.ExpireSeconds/2 {
-			fmt.Println(utils.BoldYellow("[Mining]: "),
-				utils.BoldGreen("Re-build mint transaction in case of expiring"))
-			goto ReBuildTx
-		}
-
-		payload := PowPayload{
-			Version:  1,
-			TxHash:   txHash,
-			Reserved: [44]byte{},
-			NBits:    Difficult,
-			Nonce:    nonce,
-		}
-
-		payloadBytes, err := payload.pack()
-		if err != nil {
-			Logger.Errorf("mining: payload.pack err: %v", err)
-			return
-		}
-
-		s256 := sha256.New()
-		_, err = s256.Write(payloadBytes)
-		if err != nil {
-			Logger.Errorf("mining: s256.Write err: %v", err)
-			return
-		}
-		hashBytes := s256.Sum(nil)
-		result := new(big.Int).SetBytes(hashBytes)
-
-		if result.Cmp(target) < 0 {
-			if isStop.CompareAndSwap(false, true) {
-				break
-			} else {
+			payloadBytes, err := payload.pack()
+			if err != nil {
+				Logger.Errorf("mining: payload.pack err: %v", err)
 				return
 			}
-		} else {
-			if isStop.Load() {
+
+			s256 := sha256.New()
+			_, err = s256.Write(payloadBytes)
+			if err != nil {
+				Logger.Errorf("mining: s256.Write err: %v", err)
 				return
 			}
+			hashBytes := s256.Sum(nil)
+			result := new(big.Int).SetBytes(hashBytes)
+
+			if result.Cmp(target) < 0 {
+				if isStop.CompareAndSwap(false, true) {
+					// broadcast tx
+					unSignedTx.NoncePow = nonce
+					signedTx, err := m.signMintTx(unSignedTx)
+					if err != nil {
+						Logger.Errorf("mining: signMintTx err: %v", err)
+						return
+					}
+
+					_, err = utils.BroadcastTx(conf.GetConfig().WalletRpcUrl, signedTx)
+					if err != nil {
+						fmt.Printf("mining failed: err: %v\n", err)
+						Logger.Errorf("mining: utils.BroadcastTx err: %v", err)
+						return
+					}
+
+					fmt.Println(utils.BoldYellow("[Info]: "), utils.Bold("mining success, txHash: "), utils.FgWhiteBgBlue(txHash))
+					Logger.Infof("mining success, txHash:%v", txHash)
+				} else {
+					return
+				}
+			}
+			nonce++
 		}
 
-		// next nonce
-		nonce = nonce + uint64(MinerNum)
+		hashCountChan <- int32(cycle_times)
 	}
-
-	// broadcast tx
-	unSignedTx.NoncePow = nonce
-	signedTx, err := m.signMintTx(unSignedTx)
-	if err != nil {
-		Logger.Errorf("mining: signMintTx err: %v", err)
-		return
-	}
-
-	_, err = utils.BroadcastTx(conf.GetConfig().WalletRpcUrl, signedTx)
-	if err != nil {
-		fmt.Printf("mining failed: err: %v\n", err)
-		Logger.Errorf("mining: utils.BroadcastTx err: %v", err)
-		return
-	}
-
-	fmt.Println(utils.BoldYellow("[Info]: "), utils.Bold("mining success, txHash: "), utils.FgWhiteBgBlue(txHash))
-	Logger.Infof("mining success, txHash:%v", txHash)
 }
 
 func (m *Miner) getMintTx() (string, *tx_builder.Transaction, error) {
