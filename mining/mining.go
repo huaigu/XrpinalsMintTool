@@ -1,6 +1,7 @@
 package mining
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xrpinals/XrpinalsMintTool/bitcoin"
@@ -23,7 +23,6 @@ import (
 
 var (
 	MinerNum  = 1
-	isStop    atomic.Bool
 	Difficult uint32
 )
 
@@ -89,7 +88,10 @@ func preCheck(assetInfo *utils.AssetInfoRsp) error {
 }
 
 func StartMining() {
-	isStop.Store(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	resp, err := utils.GetAssetInfo(conf.GetConfig().WalletRpcUrl, MintAssetName)
 	if err != nil {
 		fmt.Println(utils.BoldRed("[Error]: "), utils.FgWhiteBgRed(err.Error()))
@@ -107,9 +109,12 @@ func StartMining() {
 	}
 
 	Difficult = resp.Result.DynamicData.CurrentNBits
+	fmt.Printf("Difficult: %v\n", Difficult)
 
 	var wg sync.WaitGroup
 	hashCountChan := make(chan int32, 20000000)
+	resultChan := make(chan uint64)
+
 	var totalHashCount int32 = 0
 
 	ticker := time.NewTicker(1 * time.Second)
@@ -133,8 +138,13 @@ func StartMining() {
 	for i := 0; i < MinerNum; i++ {
 		wg.Add(1)
 		miner := Miner{}
-		go miner.mining(&wg, hashCountChan, i == 0)
+		go miner.mining(&wg, ctx, hashCountChan, resultChan, i == 0)
 	}
+
+	nonce := <-resultChan
+	fmt.Printf("nonce: %v\n", nonce)
+	ticker.Stop()
+	cancel()
 	wg.Wait()
 
 }
@@ -165,7 +175,7 @@ func (m *Miner) signMintTx(tx *tx_builder.Transaction) (*tx_builder.Transaction,
 	return txSigned, nil
 }
 
-func (m *Miner) mining(wg *sync.WaitGroup, hashCountChan chan<- int32, statHash bool) {
+func (m *Miner) mining(wg *sync.WaitGroup, ctx context.Context, hashCountChan chan<- int32, resultChan chan<- uint64, statHash bool) {
 	defer wg.Done()
 
 	var cycle_times int64 = 10000
@@ -183,43 +193,49 @@ func (m *Miner) mining(wg *sync.WaitGroup, hashCountChan chan<- int32, statHash 
 		Logger.Errorf("mining: buildMintTx err: %v", err)
 		return
 	}
-	target := bitcoin.NBits2Target(Difficult)
+	target := bitcoin.NBits2Target(10)
+	Logger.Printf("mining: target: %v", target)
+
 	for {
-		max_number := new(big.Int).Lsh(big.NewInt(1), 256)
-		max_number = max_number.Sub(max_number, big.NewInt(cycle_times))
-		randomNonce, err = rand.Int(rand.Reader, max_number)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			max_number := new(big.Int).Lsh(big.NewInt(1), 256)
+			max_number = max_number.Sub(max_number, big.NewInt(cycle_times))
+			randomNonce, err = rand.Int(rand.Reader, max_number)
 
-		if err != nil {
-			Logger.Errorf("mining: rand.Int err: %v", err)
-		}
-
-		nonce = randomNonce.Uint64()
-		for i := 0; i < int(cycle_times); i++ {
-			payload := PowPayload{
-				Version:  1,
-				TxHash:   txHash,
-				Reserved: [44]byte{},
-				NBits:    Difficult,
-				Nonce:    nonce,
-			}
-
-			payloadBytes, err := payload.pack()
 			if err != nil {
-				Logger.Errorf("mining: payload.pack err: %v", err)
-				return
+				Logger.Errorf("mining: rand.Int err: %v", err)
 			}
 
-			s256 := sha256.New()
-			_, err = s256.Write(payloadBytes)
-			if err != nil {
-				Logger.Errorf("mining: s256.Write err: %v", err)
-				return
-			}
-			hashBytes := s256.Sum(nil)
-			result := new(big.Int).SetBytes(hashBytes)
+			nonce = randomNonce.Uint64()
+			for i := 0; i < int(cycle_times); i++ {
+				payload := PowPayload{
+					Version:  1,
+					TxHash:   txHash,
+					Reserved: [44]byte{},
+					NBits:    Difficult,
+					Nonce:    nonce,
+				}
 
-			if result.Cmp(target) < 0 {
-				if isStop.CompareAndSwap(false, true) {
+				payloadBytes, err := payload.pack()
+				if err != nil {
+					Logger.Errorf("mining: payload.pack err: %v", err)
+					return
+				}
+
+				s256 := sha256.New()
+				_, err = s256.Write(payloadBytes)
+				if err != nil {
+					Logger.Errorf("mining: s256.Write err: %v", err)
+					return
+				}
+				hashBytes := s256.Sum(nil)
+				result := new(big.Int).SetBytes(hashBytes)
+
+				if result.Cmp(target) < 0 {
+					resultChan <- nonce
 					// broadcast tx
 					unSignedTx.NoncePow = nonce
 					signedTx, err := m.signMintTx(unSignedTx)
@@ -237,14 +253,12 @@ func (m *Miner) mining(wg *sync.WaitGroup, hashCountChan chan<- int32, statHash 
 
 					fmt.Println(utils.BoldYellow("[Info]: "), utils.Bold("mining success, txHash: "), utils.FgWhiteBgBlue(txHash))
 					Logger.Infof("mining success, txHash:%v", txHash)
-				} else {
-					return
 				}
+				nonce++
 			}
-			nonce++
-		}
 
-		hashCountChan <- int32(cycle_times)
+			hashCountChan <- int32(cycle_times)
+		}
 	}
 }
 
